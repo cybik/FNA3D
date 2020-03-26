@@ -1991,14 +1991,206 @@ void OPENGL_ApplyVertexDeclaration(
 }
 
 /* Render Targets */
+typedef struct FNA3D_RenderTargetBinding{
+	FNA3D_RenderTarget
+} FNA3D_RenderTargetBinding; // hon'Q
 
 void OPENGL_SetRenderTargets(
 	void* driverData,
 	/* FIXME: Oh shit RenderTargetBinding[] renderTargets, */
+	FNA3D_RenderTargetBinding *renderTargets, // struct containing the data and a size element?
 	FNA3D_Renderbuffer *renderbuffer,
 	FNA3D_DepthFormat depthFormat
 ) {
-	/* TODO */
+	OpenGLDevice *device = (OpenGLDevice*) driverData;
+
+	// Bind the right framebuffer, if needed
+	if (renderTargets == NULL)
+	{
+		BindFramebuffer(
+			(Backbuffer is OpenGLBackbuffer) ?
+				(Backbuffer as OpenGLBackbuffer).Handle :
+				realBackbufferFBO
+		);
+		device->renderTargetBound = 0;
+		return;
+	}
+	else
+	{
+		BindFramebuffer(device->targetFramebuffer);
+		device->renderTargetBound = 1;
+	}
+
+	int i;
+	/* sizes */
+	int32_t rt_length = sizeof(renderTargets)/sizeof(FNA3D_RenderTargetBinding);
+	int currAtt_length = sizeof(device->currentAttachments)/sizeof(GLuint);
+
+	for (i = 0; i < rt_length; i += 1)
+	{
+		FNA3D_Renderbuffer *colorBuffer = (renderTargets[i].RenderTarget as IRenderTarget).ColorBuffer;
+		if (colorBuffer != NULL)
+		{
+			device->attachments[i] = (colorBuffer as OpenGLRenderbuffer).Handle;
+			device->attachmentTypes[i] = GL_RENDERBUFFER;
+		}
+		else
+		{
+			device->attachments[i] = (renderTargets[i].RenderTarget.texture as OpenGLTexture).Handle;
+			if (renderTargets[i].RenderTarget is RenderTarget2D)
+			{
+				device->attachmentTypes[i] = GL_TEXTURE_2D;
+			}
+			else
+			{
+				device->attachmentTypes[i] = GL_TEXTURE_CUBE_MAP_POSITIVE_X + (int) renderTargets[i].CubeMapFace;
+			}
+		}
+	}
+
+	// Update the color attachments, DrawBuffers state
+	for (i = 0; i < rt_length; i += 1)
+	{
+		if (device->attachments[i] != device->currentAttachments[i])
+		{
+			if (device->currentAttachments[i] != 0)
+			{
+				if (	device->attachmentTypes[i] != GL_RENDERBUFFER &&
+					device->currentAttachmentTypes[i] == GL_RENDERBUFFER	)
+				{
+					device->glFramebufferRenderbuffer(
+						GL_FRAMEBUFFER,
+						GL_COLOR_ATTACHMENT0 + i,
+						GL_RENDERBUFFER,
+						0
+					);
+				}
+				else if (	device->attachmentTypes[i] == GL_RENDERBUFFER &&
+						device->currentAttachmentTypes[i] != GL_RENDERBUFFER	)
+				{
+					device->glFramebufferTexture2D(
+						GL_FRAMEBUFFER,
+						GL_COLOR_ATTACHMENT0 + i,
+						device->currentAttachmentTypes[i],
+						0,
+						0
+					);
+				}
+			}
+			if (device->attachmentTypes[i] == GL_RENDERBUFFER)
+			{
+				device->glFramebufferRenderbuffer(
+					GL_FRAMEBUFFER,
+					GL_COLOR_ATTACHMENT0 + i,
+					GL_RENDERBUFFER,
+					device->attachments[i]
+				);
+			}
+			else
+			{
+				device->glFramebufferTexture2D(
+					GL_FRAMEBUFFER,
+					GL_COLOR_ATTACHMENT0 + i,
+					device->attachmentTypes[i],
+					device->attachments[i],
+					0
+				);
+			}
+			device->currentAttachments[i] = device->attachments[i];
+			device->currentAttachmentTypes[i] = device->attachmentTypes[i];
+		}
+		else if (device->attachmentTypes[i] != device->currentAttachmentTypes[i])
+		{
+			/* Texture cube face change! */
+			device->glFramebufferTexture2D(
+				GL_FRAMEBUFFER,
+				GL_COLOR_ATTACHMENT0 + i,
+				device->attachmentTypes[i],
+				device->attachments[i],
+				0
+			);
+			device->currentAttachmentTypes[i] = device->attachmentTypes[i];
+		}
+	}
+	while (i < currAtt_length)
+	{
+		if (device->currentAttachments[i] != 0)
+		{
+			if (device->currentAttachmentTypes[i] == GL_RENDERBUFFER)
+			{
+				glFramebufferRenderbuffer(
+					GL_FRAMEBUFFER,
+					GL_COLOR_ATTACHMENT0 + i,
+					GL_RENDERBUFFER,
+					0
+				);
+			}
+			else
+			{
+				glFramebufferTexture2D(
+					GL_FRAMEBUFFER,
+					GL_COLOR_ATTACHMENT0 + i,
+					device->currentAttachmentTypes[i],
+					0,
+					0
+				);
+			}
+			device->currentAttachments[i] = 0;
+			device->currentAttachmentTypes[i] = GL_TEXTURE_2D;
+		}
+		i += 1;
+	}
+	if (rt_length != device->currentDrawBuffers)
+	{
+		device->glDrawBuffers(rt_length, device->drawBuffersArray);
+		device->currentDrawBuffers = rt_length;
+	}
+
+	/* Update the depth/stencil attachment */
+	/* FIXME: Notice that we do separate attach calls for the stencil.
+	 * We _should_ be able to do a single attach for depthstencil, but
+	 * some drivers (like Mesa) cannot into GL_DEPTH_STENCIL_ATTACHMENT.
+	 * Use XNAToGL.DepthStencilAttachment when this isn't a problem.
+	 * -flibit
+	 */
+	uint8_t handle;
+	if (renderbuffer == NULL)
+	{
+		handle = 0;
+	}
+	else
+	{
+		handle = (renderbuffer as OpenGLRenderbuffer).Handle;
+	}
+	if (handle != device->currentRenderbuffer)
+	{
+		if (device->currentDepthStencilFormat == FNA3D_DEPTHFORMAT_D24S8)
+		{
+			device->glFramebufferRenderbuffer(
+				GL_FRAMEBUFFER,
+				GL_STENCIL_ATTACHMENT,
+				GL_RENDERBUFFER,
+				0
+			);
+		}
+		device->currentDepthStencilFormat = depthFormat;
+		device->glFramebufferRenderbuffer(
+			GL_FRAMEBUFFER,
+			GL_DEPTH_ATTACHMENT,
+			GL_RENDERBUFFER,
+			handle
+		);
+		if (device->currentDepthStencilFormat == FNA3D_DEPTHFORMAT_D24S8)
+		{
+			device->glFramebufferRenderbuffer(
+				GL_FRAMEBUFFER,
+				GL_STENCIL_ATTACHMENT,
+				GL_RENDERBUFFER,
+				handle
+			);
+		}
+		device->currentRenderbuffer = handle;
+	}
 }
 
 void OPENGL_ResolveTarget(
