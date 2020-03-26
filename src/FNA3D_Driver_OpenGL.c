@@ -69,6 +69,13 @@ typedef struct OpenGLBuffer /* Cast from FNA3D_Buffer* */
 	GLenum dynamic;
 } OpenGLBuffer;
 
+static OpenGLBuffer NullBuffer =
+{
+	0,
+	0,
+	GL_STATIC_DRAW
+};
+
 typedef struct OpenGLRenderbuffer /* Cast from FNA3D_Renderbuffer* */
 {
 	GLuint handle;
@@ -213,7 +220,7 @@ typedef struct OpenGLDevice /* Cast from driverData */
 
 	/* ld, or LastDrawn, effect/vertex attributes */
 	int32_t ldBaseVertex;
-	FNA3D_VertexDeclaration ldVertexDeclaration;
+	FNA3D_VertexDeclaration *ldVertexDeclaration;
 	void* ldPointer;
 	MOJOSHADER_glEffect *ldEffect;
 	MOJOSHADER_effectTechnique *ldTechnique;
@@ -1969,7 +1976,7 @@ void OPENGL_VerifySampler(
 
 /* Vertex State */
 
-void OPENGL_ApplyVertexBufferBindings(
+void OPENGL_ApplyVertexBufferBindings( // ApplyVertexAttributes, Bindings
 	void* driverData,
 	/* FIXME: Oh shit VertexBufferBinding[] bindings, */
 	int32_t numBindings,
@@ -1981,13 +1988,108 @@ void OPENGL_ApplyVertexBufferBindings(
 	SDL_assert(device->supports_ARB_instanced_arrays); /* If divisor > 0 */
 }
 
-void OPENGL_ApplyVertexDeclaration(
+void OPENGL_ApplyVertexDeclaration( /* ApplyVertexAttributes, Null Bindings */
 	void* driverData,
 	FNA3D_VertexDeclaration *vertexDeclaration,
 	void* ptr,
 	int32_t vertexOffset
 ) {
 	/* TODO */
+	OpenGLDevice *device = (OpenGLDevice*) driverData;
+	BindVertexBuffer(device, NullBuffer.handle);
+
+	void* basePtr = ptr + (vertexDeclaration->vertexStride * vertexOffset);
+	if (	vertexDeclaration != device->ldVertexDeclaration ||
+		basePtr != device->ldPointer ||
+		device->currentEffect != device->ldEffect ||
+		device->currentTechnique != device->ldTechnique ||
+		device->currentPass != device->ldPass ||
+		device->effectApplied	)
+	{
+		/* There's this weird case where you can have overlapping
+		 * vertex usage/index combinations. It seems like the first
+		 * attrib gets priority, so whenever a duplicate attribute
+		 * exists, give it the next available index. If that fails, we
+		 * have to crash :/
+		 * -flibit
+		 */
+		SDL_memset(device->attrUse, 0, (sizeof(device->attrUse)*sizeof(uint8_t)));
+		FNA3D_VertexElement* element;
+		int i;
+		for(i = 0; i < (sizeof(vertexDeclaration)/sizeof(FNA3D_VertexDeclaration)); i++)
+		{
+			element = &vertexDeclaration->elements[i]; 
+			int usage = (int) element->vertexElementUsage;
+			int index = element->usageIndex;
+			if (device->attrUse[usage][index])
+			{
+				index = -1;
+				for (int j = 0; j < 16; j += 1)
+				{
+					if (!device->attrUse[usage, j])
+					{
+						index = j;
+						break;
+					}
+				}
+				if (index < 0)
+				{
+					abort();
+				}
+			}
+			device->attrUse[usage][index] = 1;
+			int attribLoc = MOJOSHADER_glGetVertexAttribLocation(
+				XNAToGL_VertexAttribUsage[usage],
+				index
+			);
+			if (attribLoc == -1)
+			{
+				// Stream not used!
+				continue;
+			}
+			device->attributeEnabled[attribLoc] = 1;
+			OpenGLVertexAttribute *attr = &device->attributes[attribLoc];
+			void* finalPtr = basePtr + element->offset;
+			uint8_t normalized = XNAToGL_VertexAttribNormalized(element);
+			if (	attr->currentBuffer != 0 ||
+				attr->currentPointer != finalPtr ||
+				attr->currentFormat != element->vertexElementFormat ||
+				attr->currentNormalized != normalized ||
+				attr->currentStride != vertexDeclaration->vertexStride	)
+			{
+				device->glVertexAttribPointer(
+					attribLoc,
+					XNAToGL_VertexAttribSize[element->vertexElementFormat],
+					XNAToGL_VertexAttribType[element->vertexElementFormat],
+					normalized,
+					vertexDeclaration->vertexStride,
+					finalPtr
+				);
+				attr->currentBuffer = 0;
+				attr->currentPointer = finalPtr;
+				attr->currentFormat = element->vertexElementFormat;
+				attr->currentNormalized = normalized;
+				attr->currentStride = vertexDeclaration->vertexStride;
+			}
+			device->attributeDivisor[attribLoc] = 0;
+		}
+		FlushGLVertexAttributes();
+
+		device->ldVertexDeclaration = vertexDeclaration;
+		device->ldPointer = ptr;
+		device->ldEffect = device->currentEffect;
+		device->ldTechnique = device->currentTechnique;
+		device->ldPass = device->currentPass;
+		device->effectApplied = 0;
+		device->ldBaseVertex = -1;
+	}
+
+	MOJOSHADER_glProgramReady();
+	MOJOSHADER_glProgramViewportInfo(
+		device->viewport.w, device->viewport.h,
+		device->backbuffer->width, device->backbuffer->height,
+		device->renderTargetBound ? 1 : 0 // lol C#
+	);
 }
 
 /* Render Targets */
@@ -4974,9 +5076,10 @@ FNA3D_Device* OPENGL_CreateDevice(
 
 	/* ld, or LastDrawn, effect/vertex attributes */
 	device->ldBaseVertex = -1;
-	device->ldVertexDeclaration.vertexStride = 0;
-	device->ldVertexDeclaration.elementCount = 0;
-	device->ldVertexDeclaration.elements = NULL;
+	device->ldVertexDeclaration = SDL_malloc(sizeof(FNA3D_VertexDeclaration));
+	device->ldVertexDeclaration->vertexStride = 0;
+	device->ldVertexDeclaration->elementCount = 0;
+	device->ldVertexDeclaration->elements = NULL;
 	device->ldPointer = NULL;
 	device->ldEffect = NULL;
 	device->ldTechnique = NULL;
