@@ -1,0 +1,22 @@
+{
+    "files.associations": {
+        "sdl.h": "c",
+        "fna3d.h": "c",
+        "fna3d_driver.h": "c",
+        "fna3d_driver_opengl_glfuncs.h": "c",
+        "fna3d_driver_opengl.h": "c",
+        "functional": "c",
+        "array": "c",
+        "string_view": "c",
+        "initializer_list": "c",
+        "utility": "c"
+    },
+    "cmake.configureArgs": [
+        "-DFNA3D_DRIVER_OPENGL=ON"
+    ],
+    "C_Cpp.default.configurationProvider": "vector-of-bool.cmake-tools",
+    "C_Cpp.default.cStandard": "c99",
+    "C_Cpp.experimentalFeatures": "Enabled",
+    "C_Cpp.default.intelliSenseMode": "gcc-x64",
+    "clang.executable": "clang-6.0"
+}
